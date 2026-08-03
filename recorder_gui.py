@@ -296,6 +296,7 @@ class RecorderGUI:
                     self.text_merge_btn.configure(state="normal")
                     name, count = payload
                     self._log(f"TXT 합본 완료: {name} ({count}개)")
+                    self._log("합본 검증 후 기존 개별 TXT 삭제 완료")
                 elif kind == "text_merge_error":
                     self.text_merge_btn.configure(state="normal")
                     self._log(f"⚠️ TXT 합치기 실패: {payload}")
@@ -519,28 +520,41 @@ class RecorderGUI:
 
     # ---------------- 전사 TXT 합치기 ----------------
     def _merge_transcript_files(self):
+        parts = self._transcript_parts()
+        if not parts:
+            self._log("오늘 폴더에 합칠 개별 전사 TXT가 없습니다.")
+            return
+        confirmed = messagebox.askyesno(
+            "전사 TXT 합치기",
+            f"오늘의 개별 TXT {len(parts)}개를 하나로 합친 뒤\n"
+            "합본을 검증하고 기존 개별 TXT를 삭제합니다. 계속할까요?")
+        if not confirmed:
+            return
         self.ui_q.put(("text_merge_started", None))
-        threading.Thread(target=self._run_text_merge, daemon=True).start()
+        threading.Thread(target=self._run_text_merge, args=(parts,), daemon=True).start()
 
-    def _run_text_merge(self):
+    def _run_text_merge(self, parts):
         try:
-            path, count = self._create_merged_transcript()
+            path, count = self._create_merged_transcript(parts)
             self.ui_q.put(("text_merged", (os.path.basename(path), count)))
         except Exception as e:
             self.ui_q.put(("text_merge_error", str(e)))
 
-    def _create_merged_transcript(self):
-        """오늘 날짜의 개별 전사 TXT를 시간순으로 합치고 원본은 보존한다."""
+    def _transcript_parts(self):
         text_dir = self._dated_dir(self.transcribe_dir)
         if not os.path.isdir(text_dir):
-            raise RuntimeError("오늘 날짜의 전사 폴더가 없습니다.")
-
-        parts = sorted(
+            return []
+        return sorted(
             os.path.join(text_dir, name)
             for name in os.listdir(text_dir)
             if (unicodedata.normalize("NFC", name).startswith("강의_")
                 and not unicodedata.normalize("NFC", name).startswith("강의_전사_합본_")
                 and name.lower().endswith(".txt")))
+
+    def _create_merged_transcript(self, parts=None):
+        """개별 전사 TXT를 합치고 검증한 후 개별 원본을 삭제한다."""
+        text_dir = self._dated_dir(self.transcribe_dir)
+        parts = list(parts) if parts is not None else self._transcript_parts()
         if not parts:
             raise RuntimeError("오늘 폴더에 합칠 전사 TXT가 없습니다.")
 
@@ -548,17 +562,24 @@ class RecorderGUI:
         output_path = os.path.join(text_dir, f"강의_전사_합본_{stamp}.txt")
         temporary = output_path + ".tmp"
         try:
+            has_content = False
             with open(temporary, "w", encoding="utf-8") as output:
                 for index, part in enumerate(parts):
                     with open(part, "r", encoding="utf-8") as source:
                         content = source.read().strip()
+                    has_content = has_content or bool(content)
                     if index:
                         output.write("\n\n")
                     output.write(content)
                 output.write("\n")
-            if os.path.getsize(temporary) <= 1:
+            if not has_content:
                 raise RuntimeError("전사 내용이 비어 있어 합본을 만들지 않았습니다.")
             os.replace(temporary, output_path)
+            with open(output_path, "r", encoding="utf-8") as verified:
+                if not verified.read().strip():
+                    raise RuntimeError("합본 검증에 실패해 기존 TXT를 삭제하지 않았습니다.")
+            for part in parts:
+                os.remove(part)
             return output_path, len(parts)
         finally:
             try:
