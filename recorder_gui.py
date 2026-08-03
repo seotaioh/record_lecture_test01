@@ -33,7 +33,7 @@ class RecorderGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("강의 녹음기")
-        self.root.geometry("440x495")
+        self.root.geometry("440x535")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)  # 다른 앱 위에서 버튼이 항상 보이도록 유지
 
@@ -83,7 +83,11 @@ class RecorderGUI:
         self.merge_btn = tk.Button(
             self.root, text="♫  분할 음성 합치기", font=small,
             command=self._confirm_audio_merge)
-        self.merge_btn.pack(pady=(0, 8), padx=16, fill="x")
+        self.merge_btn.pack(pady=(0, 4), padx=16, fill="x")
+        self.text_merge_btn = tk.Button(
+            self.root, text="TXT  전사 파일 합치기", font=small,
+            command=self._merge_transcript_files)
+        self.text_merge_btn.pack(pady=(0, 8), padx=16, fill="x")
 
         # 출력 경고/안내
         self.notice = tk.Label(self.root, text="", font=small, fg="#b26a00",
@@ -285,6 +289,16 @@ class RecorderGUI:
                 elif kind == "audio_merge_error":
                     self.merge_btn.configure(state="normal")
                     self._log(f"⚠️ 음성 합치기 실패: {payload}")
+                elif kind == "text_merge_started":
+                    self.text_merge_btn.configure(state="disabled")
+                    self._log("전사 TXT를 시간순으로 합치는 중…")
+                elif kind == "text_merged":
+                    self.text_merge_btn.configure(state="normal")
+                    name, count = payload
+                    self._log(f"TXT 합본 완료: {name} ({count}개)")
+                elif kind == "text_merge_error":
+                    self.text_merge_btn.configure(state="normal")
+                    self._log(f"⚠️ TXT 합치기 실패: {payload}")
                 elif kind == "short":
                     self._log("… 너무 짧아 저장 안 함")
                 elif kind == "error":
@@ -497,6 +511,55 @@ class RecorderGUI:
             for part in parts:
                 os.remove(part)
             return output_path, len(parts), expected_frames / first.samplerate
+        finally:
+            try:
+                os.remove(temporary)
+            except FileNotFoundError:
+                pass
+
+    # ---------------- 전사 TXT 합치기 ----------------
+    def _merge_transcript_files(self):
+        self.ui_q.put(("text_merge_started", None))
+        threading.Thread(target=self._run_text_merge, daemon=True).start()
+
+    def _run_text_merge(self):
+        try:
+            path, count = self._create_merged_transcript()
+            self.ui_q.put(("text_merged", (os.path.basename(path), count)))
+        except Exception as e:
+            self.ui_q.put(("text_merge_error", str(e)))
+
+    def _create_merged_transcript(self):
+        """오늘 날짜의 개별 전사 TXT를 시간순으로 합치고 원본은 보존한다."""
+        text_dir = self._dated_dir(self.transcribe_dir)
+        if not os.path.isdir(text_dir):
+            raise RuntimeError("오늘 날짜의 전사 폴더가 없습니다.")
+
+        parts = sorted(
+            os.path.join(text_dir, name)
+            for name in os.listdir(text_dir)
+            if (unicodedata.normalize("NFC", name).startswith("강의_")
+                and not unicodedata.normalize("NFC", name).startswith("강의_전사_합본_")
+                and name.lower().endswith(".txt")))
+        if not parts:
+            raise RuntimeError("오늘 폴더에 합칠 전사 TXT가 없습니다.")
+
+        stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        output_path = os.path.join(text_dir, f"강의_전사_합본_{stamp}.txt")
+        temporary = output_path + ".tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as output:
+                for index, part in enumerate(parts):
+                    with open(part, "r", encoding="utf-8") as source:
+                        content = source.read().strip()
+                    if index:
+                        output.write("\n\n")
+                    output.write(content)
+                output.write("\n")
+            if os.path.getsize(temporary) <= 1:
+                raise RuntimeError("전사 내용이 비어 있어 합본을 만들지 않았습니다.")
+            os.replace(temporary, output_path)
+            return output_path, len(parts)
         finally:
             try:
                 os.remove(temporary)
