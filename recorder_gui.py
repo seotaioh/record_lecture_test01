@@ -314,8 +314,14 @@ class RecorderGUI:
     # ---------------- 화면 영역 캡처 ----------------
     @staticmethod
     def _dated_dir(base_dir):
-        """상위 폴더 아래에 저장 시점의 YYYY-MM-DD 폴더 경로를 만든다."""
-        return os.path.join(base_dir, dt.datetime.now().strftime("%Y-%m-%d"))
+        """번호 상위 폴더 아래에 같은 번호가 붙은 날짜 폴더 경로를 만든다."""
+        base_name = unicodedata.normalize("NFC", os.path.basename(base_dir))
+        prefix = next(
+            (number for number in ("1)", "2)", "3)") if base_name.startswith(number)),
+            "")
+        day = dt.datetime.now().strftime("%Y-%m-%d")
+        folder_name = f"{prefix} {day}" if prefix else day
+        return os.path.join(base_dir, folder_name)
 
     def _capture_screen_region(self):
         """버튼 클릭 시 지정한 외장 화면 전체를 원본 해상도의 PNG로 저장."""
