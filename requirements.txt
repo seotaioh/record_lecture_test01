@@ -1,0 +1,5 @@
+sounddevice>=0.5
+soundfile>=0.13
+numpy>=2.0
+scipy>=1.13
+mlx-whisper>=0.4
