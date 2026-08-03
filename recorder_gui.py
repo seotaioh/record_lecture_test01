@@ -10,6 +10,7 @@
 import os
 import ctypes
 import queue
+import shutil
 import subprocess
 import threading
 import datetime as dt
@@ -33,7 +34,7 @@ class RecorderGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("강의 녹음기")
-        self.root.geometry("440x535")
+        self.root.geometry("440x575")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)  # 다른 앱 위에서 버튼이 항상 보이도록 유지
 
@@ -44,6 +45,7 @@ class RecorderGUI:
         self.save_dir = r.SAVE_DIR  # 녹음 상위 폴더
         self.transcribe_dir = os.path.join(r.OUTPUT_ROOT, "2) 전사")
         self.capture_dir = os.path.join(r.OUTPUT_ROOT, "3) 캡처")  # 캡처 상위 폴더
+        self.combined_dir = os.path.join(r.OUTPUT_ROOT, "4) 종합폴더")
         self.transcribe_var = None  # _build_ui에서 생성
 
         self._build_ui()
@@ -87,7 +89,11 @@ class RecorderGUI:
         self.text_merge_btn = tk.Button(
             self.root, text="TXT  전사 파일 합치기", font=small,
             command=self._merge_transcript_files)
-        self.text_merge_btn.pack(pady=(0, 8), padx=16, fill="x")
+        self.text_merge_btn.pack(pady=(0, 4), padx=16, fill="x")
+        self.collect_btn = tk.Button(
+            self.root, text="4)  종합폴더로 모으기", font=small,
+            command=self._confirm_daily_collection)
+        self.collect_btn.pack(pady=(0, 8), padx=16, fill="x")
 
         # 출력 경고/안내
         self.notice = tk.Label(self.root, text="", font=small, fg="#b26a00",
@@ -300,6 +306,17 @@ class RecorderGUI:
                 elif kind == "text_merge_error":
                     self.text_merge_btn.configure(state="normal")
                     self._log(f"⚠️ TXT 합치기 실패: {payload}")
+                elif kind == "collection_started":
+                    self.collect_btn.configure(state="disabled")
+                    self._log("오늘의 녹음·전사·캡처 파일을 종합폴더로 이동 중…")
+                elif kind == "collection_done":
+                    self.collect_btn.configure(state="normal")
+                    folder_name, count = payload
+                    self._log(f"4) 종합 완료: {folder_name} ({count}개 이동)")
+                    self._log("기존 날짜 폴더는 빈 폴더로 유지")
+                elif kind == "collection_error":
+                    self.collect_btn.configure(state="normal")
+                    self._log(f"⚠️ 종합폴더 이동 실패: {payload}")
                 elif kind == "short":
                     self._log("… 너무 짧아 저장 안 함")
                 elif kind == "error":
@@ -320,6 +337,7 @@ class RecorderGUI:
             "1)": "녹음1)",
             "2)": "전사2)",
             "3)": "캡처3)",
+            "4)": "종합4)",
         }
         prefix = next(
             (label for number, label in prefixes.items() if base_name.startswith(number)),
@@ -598,8 +616,87 @@ class RecorderGUI:
             except FileNotFoundError:
                 pass
 
+    # ---------------- 날짜별 파일 종합 ----------------
+    def _confirm_daily_collection(self):
+        if self.session_on:
+            self._log("⚠️ 먼저 녹음을 정지한 뒤 종합폴더로 이동하세요.")
+            return
+        sources = self._daily_collection_sources()
+        file_count = sum(len(files) for _, files in sources)
+        if file_count == 0:
+            self._log("오늘 날짜 폴더에 이동할 파일이 없습니다.")
+            return
+        confirmed = messagebox.askyesno(
+            "4) 종합폴더로 모으기",
+            f"오늘의 녹음·전사·캡처 파일 {file_count}개를\n"
+            "종합 날짜 폴더로 이동합니다. 기존 날짜 폴더는 비워집니다. 계속할까요?")
+        if not confirmed:
+            return
+        self.ui_q.put(("collection_started", None))
+        threading.Thread(target=self._run_daily_collection, daemon=True).start()
+
+    def _daily_collection_sources(self):
+        sources = []
+        for base_dir in (self.save_dir, self.transcribe_dir, self.capture_dir):
+            dated_dir = self._dated_dir(base_dir)
+            files = []
+            if os.path.isdir(dated_dir):
+                files = sorted(
+                    os.path.join(dated_dir, name)
+                    for name in os.listdir(dated_dir)
+                    if os.path.isfile(os.path.join(dated_dir, name))
+                    and name != ".DS_Store")
+            sources.append((dated_dir, files))
+        return sources
+
+    def _run_daily_collection(self):
+        try:
+            folder, count = self._collect_daily_files()
+            self.ui_q.put(("collection_done", (os.path.basename(folder), count)))
+        except Exception as e:
+            self.ui_q.put(("collection_error", str(e)))
+
+    def _collect_daily_files(self):
+        """세 날짜 폴더의 파일을 종합 날짜 폴더로 이동하고 원래 폴더는 유지."""
+        sources = self._daily_collection_sources()
+        files = [(source_dir, path) for source_dir, paths in sources for path in paths]
+        if not files:
+            raise RuntimeError("오늘 날짜 폴더에 이동할 파일이 없습니다.")
+
+        destination_dir = self._dated_dir(self.combined_dir)
+        os.makedirs(destination_dir, exist_ok=True)
+        destinations = []
+        names = set()
+        for source_dir, source_path in files:
+            name = os.path.basename(source_path)
+            destination = os.path.join(destination_dir, name)
+            if name in names or os.path.exists(destination):
+                raise RuntimeError(f"같은 이름의 파일이 있어 이동하지 않았습니다: {name}")
+            names.add(name)
+            destinations.append((source_dir, source_path, destination))
+
+        moved = []
+        try:
+            for source_dir, source_path, destination in destinations:
+                shutil.move(source_path, destination)
+                moved.append((source_path, destination))
+        except Exception:
+            for source_path, destination in reversed(moved):
+                if os.path.exists(destination) and not os.path.exists(source_path):
+                    shutil.move(destination, source_path)
+            raise
+
+        # Finder가 만든 숨김 파일을 제거해 원래 날짜 폴더에는 내용이 남지 않게 한다.
+        for source_dir, _ in sources:
+            metadata = os.path.join(source_dir, ".DS_Store")
+            try:
+                os.remove(metadata)
+            except FileNotFoundError:
+                pass
+        return destination_dir, len(moved)
+
     def _open_folder(self):
-        folders = (self.save_dir, self.transcribe_dir, self.capture_dir)
+        folders = (self.save_dir, self.transcribe_dir, self.capture_dir, self.combined_dir)
         for folder in folders:
             os.makedirs(folder, exist_ok=True)
         subprocess.run(["open", *folders])
