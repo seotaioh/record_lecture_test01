@@ -24,7 +24,9 @@ import soundfile as sf
 from scipy.signal import resample_poly
 
 # ----------------------------- 설정(기본값) -----------------------------
-SAVE_DIR = os.path.expanduser("~/강의녹음")   # 저장 폴더 (로컬 개인 폴더)
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_ROOT = os.path.dirname(PROJECT_DIR)     # 저장소의 상위 작업 폴더
+SAVE_DIR = os.path.join(OUTPUT_ROOT, "1) 녹음")
 SAMPLE_RATE = 48000                           # 샘플레이트 (BlackHole 기본 48kHz)
 CHANNELS = 2                                  # 스테레오
 BLOCK_SECONDS = 0.25                          # 오디오를 읽는 블록 길이(초)
@@ -37,7 +39,7 @@ DEVICE_KEYWORD = "BlackHole"                  # 입력 장치 찾을 때 쓰는 
 MAKE_UPLOAD_COPY = True                        # True면 16kHz 모노 사본을 함께 저장
 UPLOAD_SAMPLE_RATE = 16000                     # 말소리 전사에 표준인 16kHz
 UPLOAD_SUBDIR = "업로드용"                      # 원본 폴더 아래 이 하위폴더에 저장
-SAVE_ORIGINAL = False                          # False면 원본(대용량)은 안 만들고 업로드용 한 개만 생성
+SAVE_ORIGINAL = False                          # 원본 없이 16kHz 모노 업로드용 파일만 생성
 # ----------------------------------------------------------------------
 
 
@@ -143,10 +145,9 @@ def save_clip(frames_list, save_dir, upload_copy=True):
     base_name = timestamp_name()
 
     if not SAVE_ORIGINAL:
-        # 원본 없이 업로드용(16kHz 모노) 파일 한 개만 생성
-        up_dir = os.path.join(save_dir, UPLOAD_SUBDIR)
-        os.makedirs(up_dir, exist_ok=True)
-        only_path = os.path.join(up_dir, base_name)
+        # 날짜 폴더에 원본 없이 16kHz 모노 파일 한 개만 생성
+        os.makedirs(save_dir, exist_ok=True)
+        only_path = os.path.join(save_dir, base_name)
         sf.write(only_path, to_upload_audio(data), UPLOAD_SAMPLE_RATE, subtype="PCM_16")
         return only_path, duration, None
 
