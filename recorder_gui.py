@@ -8,6 +8,7 @@
 """
 
 import os
+import ctypes
 import queue
 import subprocess
 import threading
@@ -16,9 +17,11 @@ import unicodedata
 
 import numpy as np
 import sounddevice as sd
+import soundfile as sf
 
 import tkinter as tk
 from tkinter import font as tkfont
+from tkinter import messagebox
 
 import recorder as r  # 녹음 로직 재사용 (save_clip, find_input_device, rms 등)
 
@@ -30,7 +33,7 @@ class RecorderGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("강의 녹음기")
-        self.root.geometry("440x455")
+        self.root.geometry("440x495")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)  # 다른 앱 위에서 버튼이 항상 보이도록 유지
 
@@ -46,6 +49,7 @@ class RecorderGUI:
         self._build_ui()
         self._check_output()
         self._poll_ui()
+        self.root.after(500, self._request_screen_capture_permission)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ---------------- UI ----------------
@@ -75,7 +79,11 @@ class RecorderGUI:
         self.pdf_btn = tk.Button(
             self.root, text="PDF  남은 PNG를 PDF로 묶기", font=small,
             command=self._create_pdf)
-        self.pdf_btn.pack(pady=(0, 8), padx=16, fill="x")
+        self.pdf_btn.pack(pady=(0, 4), padx=16, fill="x")
+        self.merge_btn = tk.Button(
+            self.root, text="♫  분할 음성 합치기", font=small,
+            command=self._confirm_audio_merge)
+        self.merge_btn.pack(pady=(0, 8), padx=16, fill="x")
 
         # 출력 경고/안내
         self.notice = tk.Label(self.root, text="", font=small, fg="#b26a00",
@@ -253,6 +261,9 @@ class RecorderGUI:
                 elif kind == "capture_cancelled":
                     self.capture_btn.configure(state="normal")
                     self._log("화면 캡처 취소")
+                elif kind == "capture_error":
+                    self.capture_btn.configure(state="normal")
+                    self._log(f"⚠️ 화면 캡처 실패: {payload}")
                 elif kind == "pdf_started":
                     self.pdf_btn.configure(state="disabled")
                     self._log("남아 있는 PNG를 시간순으로 PDF 변환 중…")
@@ -263,6 +274,17 @@ class RecorderGUI:
                 elif kind == "pdf_error":
                     self.pdf_btn.configure(state="normal")
                     self._log(f"⚠️ PDF 변환 실패: {payload}")
+                elif kind == "audio_merge_started":
+                    self.merge_btn.configure(state="disabled")
+                    self._log("분할 음성 파일을 시간순으로 합치는 중…")
+                elif kind == "audio_merged":
+                    self.merge_btn.configure(state="normal")
+                    name, count, duration = payload
+                    self._log(f"♫ 합본 완료: {name} ({count}개, {duration:.1f}초)")
+                    self._log("합본 검증 후 기존 분할 파일 삭제 완료")
+                elif kind == "audio_merge_error":
+                    self.merge_btn.configure(state="normal")
+                    self._log(f"⚠️ 음성 합치기 실패: {payload}")
                 elif kind == "short":
                     self._log("… 너무 짧아 저장 안 함")
                 elif kind == "error":
@@ -285,6 +307,30 @@ class RecorderGUI:
         self.ui_q.put(("capture_started", None))
         threading.Thread(target=self._run_screen_capture, daemon=True).start()
 
+    @staticmethod
+    def _screen_capture_api():
+        framework = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        framework.CGPreflightScreenCaptureAccess.restype = ctypes.c_bool
+        framework.CGRequestScreenCaptureAccess.restype = ctypes.c_bool
+        return framework
+
+    def _request_screen_capture_permission(self):
+        """macOS 화면 기록 권한을 확인하고 최초 실행 시 시스템 요청을 표시."""
+        try:
+            framework = self._screen_capture_api()
+            if framework.CGPreflightScreenCaptureAccess():
+                self._log("✅ 화면 기록 권한 확인 완료")
+                return
+            granted = framework.CGRequestScreenCaptureAccess()
+            if not granted:
+                self._log("⚠️ 화면 기록 권한 필요: 시스템 설정에서 '강의 녹음기'를 허용하세요.")
+                subprocess.run([
+                    "open",
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"])
+        except Exception as e:
+            self._log(f"화면 기록 권한 확인 실패: {e}")
+
     def _run_screen_capture(self):
         capture_dir = self._dated_dir(self.capture_dir)
         os.makedirs(capture_dir, exist_ok=True)
@@ -293,11 +339,13 @@ class RecorderGUI:
         try:
             # -D 2: 외장 4K 화면 전체, -x: 캡처 효과음 끄기
             result = subprocess.run(
-                ["screencapture", "-D", str(CAPTURE_DISPLAY), "-x", path])
+                ["screencapture", "-D", str(CAPTURE_DISPLAY), "-x", path],
+                capture_output=True, text=True)
             if result.returncode == 0 and os.path.isfile(path):
                 self.ui_q.put(("captured", os.path.basename(path)))
             else:
-                self.ui_q.put(("capture_cancelled", None))
+                detail = result.stderr.strip() or "화면 기록 권한 또는 외장 화면 연결을 확인하세요."
+                self.ui_q.put(("capture_error", detail))
         except Exception as e:
             self.ui_q.put(("capture_cancelled", None))
             self.ui_q.put(("error", f"화면 캡처 실패: {e}"))
@@ -363,6 +411,97 @@ class RecorderGUI:
                     os.remove(temporary)
                 except FileNotFoundError:
                     pass
+
+    # ---------------- 분할 음성 합치기 ----------------
+    def _audio_parts(self):
+        audio_dir = self._dated_dir(self.save_dir)
+        if not os.path.isdir(audio_dir):
+            return []
+        return sorted(
+            os.path.join(audio_dir, name)
+            for name in os.listdir(audio_dir)
+            if (unicodedata.normalize("NFC", name).startswith("강의_")
+                and not unicodedata.normalize("NFC", name).startswith("강의_합본_")
+                and name.lower().endswith(".wav")))
+
+    def _confirm_audio_merge(self):
+        if self.session_on:
+            self._log("⚠️ 먼저 녹음을 정지한 뒤 음성 파일을 합쳐주세요.")
+            return
+        parts = self._audio_parts()
+        if len(parts) < 2:
+            self._log("합칠 분할 음성 파일이 2개 이상 필요합니다.")
+            return
+        confirmed = messagebox.askyesno(
+            "분할 음성 합치기",
+            f"오늘의 음성 파일 {len(parts)}개를 하나로 합친 뒤\n"
+            "합본이 정상인지 검증하고 기존 조각을 삭제합니다. 계속할까요?")
+        if not confirmed:
+            return
+        self.ui_q.put(("audio_merge_started", None))
+        threading.Thread(target=self._run_audio_merge, args=(parts,), daemon=True).start()
+
+    def _run_audio_merge(self, parts):
+        try:
+            path, count, duration = self._merge_audio_files(parts)
+            self.ui_q.put(("audio_merged", (os.path.basename(path), count, duration)))
+        except Exception as e:
+            self.ui_q.put(("audio_merge_error", str(e)))
+
+    @staticmethod
+    def _merge_audio_files(parts):
+        """같은 형식의 WAV를 합치고 검증한 후 원본 조각만 삭제한다."""
+        if len(parts) < 2:
+            raise RuntimeError("합칠 음성 파일이 2개 이상 필요합니다.")
+
+        first = sf.info(parts[0])
+        if first.frames <= 0:
+            raise RuntimeError(f"빈 음성 파일입니다: {os.path.basename(parts[0])}")
+        for part in parts[1:]:
+            info = sf.info(part)
+            if info.samplerate != first.samplerate or info.channels != first.channels:
+                raise RuntimeError(f"음성 형식이 다릅니다: {os.path.basename(part)}")
+            if info.frames <= 0:
+                raise RuntimeError(f"빈 음성 파일입니다: {os.path.basename(part)}")
+
+        audio_dir = os.path.dirname(parts[0])
+        stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        output_path = os.path.join(audio_dir, f"강의_합본_{stamp}.wav")
+        temporary = output_path + ".tmp"
+        expected_frames = 0
+
+        try:
+            with sf.SoundFile(
+                    temporary, mode="w", samplerate=first.samplerate,
+                    channels=first.channels, subtype=first.subtype, format="WAV") as output:
+                for part in parts:
+                    with sf.SoundFile(part, mode="r") as source:
+                        while True:
+                            block = source.read(65536, dtype="float32", always_2d=True)
+                            if len(block) == 0:
+                                break
+                            output.write(block)
+                            expected_frames += len(block)
+
+            merged = sf.info(temporary)
+            if (merged.frames != expected_frames
+                    or merged.samplerate != first.samplerate
+                    or merged.channels != first.channels):
+                raise RuntimeError("합본 검증에 실패해 기존 파일을 삭제하지 않았습니다.")
+
+            os.replace(temporary, output_path)
+            # 완성된 합본을 다시 확인한 뒤에만 원본 조각을 삭제한다.
+            verified = sf.info(output_path)
+            if verified.frames != expected_frames:
+                raise RuntimeError("최종 합본 검증에 실패해 기존 파일을 삭제하지 않았습니다.")
+            for part in parts:
+                os.remove(part)
+            return output_path, len(parts), expected_frames / first.samplerate
+        finally:
+            try:
+                os.remove(temporary)
+            except FileNotFoundError:
+                pass
 
     def _open_folder(self):
         folders = (self.save_dir, self.transcribe_dir, self.capture_dir)

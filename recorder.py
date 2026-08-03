@@ -31,7 +31,7 @@ SAMPLE_RATE = 48000                           # 샘플레이트 (BlackHole 기�
 CHANNELS = 2                                  # 스테레오
 BLOCK_SECONDS = 0.25                          # 오디오를 읽는 블록 길이(초)
 SILENCE_THRESHOLD = 0.008                     # 이 RMS 이하면 '조용함'으로 간주 (0~1)
-SILENCE_TIMEOUT = 3.0                         # 이만큼(초) 계속 조용하면 녹음 종료·저장
+SILENCE_TIMEOUT = 600.0                       # 10분간 계속 조용하면 녹음 종료·저장
 MIN_CLIP_SECONDS = 2.0                        # 이보다 짧은 녹음은 잡음으로 보고 버림
 DEVICE_KEYWORD = "BlackHole"                  # 입력 장치 찾을 때 쓰는 이름 키워드
 
