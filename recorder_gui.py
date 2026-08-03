@@ -34,8 +34,9 @@ class RecorderGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("강의 녹음기")
-        self.root.geometry("440x575")
+        self.root.geometry("480x750")
         self.root.resizable(False, False)
+        self.root.configure(bg="#f3f5f7")
         self.root.attributes("-topmost", True)  # 다른 앱 위에서 버튼이 항상 보이도록 유지
 
         self.session_on = False
@@ -56,64 +57,97 @@ class RecorderGUI:
 
     # ---------------- UI ----------------
     def _build_ui(self):
-        big = tkfont.Font(size=22, weight="bold")
-        mid = tkfont.Font(size=15, weight="bold")
-        small = tkfont.Font(size=11)
+        title_font = tkfont.Font(family="Apple SD Gothic Neo", size=20, weight="bold")
+        subtitle_font = tkfont.Font(family="Apple SD Gothic Neo", size=10)
+        status_font = tkfont.Font(family="Apple SD Gothic Neo", size=23, weight="bold")
+        button_font = tkfont.Font(family="Apple SD Gothic Neo", size=13, weight="bold")
+        small = tkfont.Font(family="Apple SD Gothic Neo", size=11)
+        tiny = tkfont.Font(family="Apple SD Gothic Neo", size=10)
 
-        tk.Label(self.root, text="🎧 강의 자동 녹음기", font=mid).pack(pady=(14, 4))
+        # 상단 제목
+        header = tk.Frame(self.root, bg="#f3f5f7")
+        header.pack(fill="x", padx=22, pady=(18, 10))
+        tk.Label(header, text="🎧  강의 녹음기", font=title_font,
+                 bg="#f3f5f7", fg="#172033").pack(anchor="w")
+        tk.Label(header, text="녹음부터 전사·캡처·정리까지 한 곳에서",
+                 font=subtitle_font, bg="#f3f5f7", fg="#6b7280").pack(anchor="w", pady=(2, 0))
 
-        # 상태 표시 (배경색으로 상태 구분)
-        self.status = tk.Label(self.root, text="⚪  대기 중", font=big,
-                               bg="#e8e8e8", fg="#333333", width=18, height=2)
-        self.status.pack(pady=6, padx=16, fill="x")
+        # 녹음 카드
+        record_card = tk.Frame(self.root, bg="#ffffff", highlightbackground="#dfe3e8",
+                               highlightthickness=1)
+        record_card.pack(fill="x", padx=20, pady=(0, 10))
+        self.status = tk.Label(record_card, text="●  대기 중", font=status_font,
+                               bg="#eef2f5", fg="#344054", height=2)
+        self.status.pack(fill="x", padx=10, pady=(10, 8))
+        self.btn = tk.Button(
+            record_card, text="●  녹음 시작", font=button_font, height=2,
+            command=self._toggle, fg="#12372a", bg="#e7f6ed",
+            activebackground="#d1efdc", activeforeground="#12372a",
+            relief="flat", bd=0, highlightbackground="#16794a")
+        self.btn.pack(fill="x", padx=10, pady=(0, 10))
 
-        # 시작/정지 버튼
-        self.btn = tk.Button(self.root, text="●  녹음 시작", font=mid,
-                             height=2, command=self._toggle,
-                             highlightbackground="#2e7d32")
-        self.btn.pack(pady=8, padx=16, fill="x")
+        # 빠른 작업 카드
+        action_card = tk.Frame(self.root, bg="#ffffff", highlightbackground="#dfe3e8",
+                               highlightthickness=1)
+        action_card.pack(fill="x", padx=20, pady=(0, 10))
+        tk.Label(action_card, text="빠른 작업", font=button_font,
+                 bg="#ffffff", fg="#344054").grid(
+                     row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 7))
+        action_card.grid_columnconfigure(0, weight=1, uniform="actions")
+        action_card.grid_columnconfigure(1, weight=1, uniform="actions")
 
-        # 외장 화면 전체를 원본 해상도로 캡처
-        self.capture_btn = tk.Button(
-            self.root, text="▣  외장 화면 캡처", font=small,
-            command=self._capture_screen_region)
-        self.capture_btn.pack(pady=(0, 4), padx=16, fill="x")
-        self.pdf_btn = tk.Button(
-            self.root, text="PDF  남은 PNG를 PDF로 묶기", font=small,
-            command=self._create_pdf)
-        self.pdf_btn.pack(pady=(0, 4), padx=16, fill="x")
-        self.merge_btn = tk.Button(
-            self.root, text="♫  분할 음성 합치기", font=small,
-            command=self._confirm_audio_merge)
-        self.merge_btn.pack(pady=(0, 4), padx=16, fill="x")
-        self.text_merge_btn = tk.Button(
-            self.root, text="TXT  전사 파일 합치기", font=small,
-            command=self._merge_transcript_files)
-        self.text_merge_btn.pack(pady=(0, 4), padx=16, fill="x")
+        def action_button(text, command, row, column):
+            button = tk.Button(
+                action_card, text=text, font=small, command=command,
+                height=2, bg="#f8fafc", fg="#263244", activebackground="#e8eef5",
+                relief="flat", bd=0, highlightbackground="#d8dee6")
+            button.grid(row=row, column=column, sticky="nsew", padx=(10 if column == 0 else 5,
+                        5 if column == 0 else 10), pady=4)
+            return button
+
+        self.capture_btn = action_button("▣  외장 화면 캡처", self._capture_screen_region, 1, 0)
+        self.pdf_btn = action_button("▤  PDF 만들기", self._create_pdf, 1, 1)
+        self.merge_btn = action_button("♫  음성 합치기", self._confirm_audio_merge, 2, 0)
+        self.text_merge_btn = action_button("TXT  전사 합치기", self._merge_transcript_files, 2, 1)
+
         self.collect_btn = tk.Button(
-            self.root, text="4)  종합폴더로 모으기", font=small,
-            command=self._confirm_daily_collection)
-        self.collect_btn.pack(pady=(0, 8), padx=16, fill="x")
+            action_card, text="4)  오늘 자료를 종합폴더로 모으기", font=button_font,
+            command=self._confirm_daily_collection, height=2,
+            bg="#edf4ff", fg="#175cd3", activebackground="#dbeafe",
+            relief="flat", bd=0, highlightbackground="#84adff")
+        self.collect_btn.grid(row=3, column=0, columnspan=2, sticky="ew",
+                              padx=10, pady=(6, 10))
 
-        # 출력 경고/안내
-        self.notice = tk.Label(self.root, text="", font=small, fg="#b26a00",
-                               wraplength=400, justify="left")
-        self.notice.pack(pady=(0, 4), padx=16, fill="x")
-
-        # 녹음 후 자동 전사 (Whisper) 옵션
+        # 설정과 장치 안내
+        option_card = tk.Frame(self.root, bg="#ffffff", highlightbackground="#dfe3e8",
+                               highlightthickness=1)
+        option_card.pack(fill="x", padx=20, pady=(0, 10))
+        self.notice = tk.Label(option_card, text="", font=tiny, fg="#b26a00",
+                               bg="#ffffff", wraplength=420, justify="left")
+        self.notice.pack(fill="x", padx=12, pady=(9, 3))
         self.transcribe_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(self.root, text="🖊  녹음 후 자동 전사 (Whisper · 무료·로컬)",
-                       variable=self.transcribe_var, font=small).pack(anchor="w", padx=16)
+        tk.Checkbutton(
+            option_card, text="녹음 후 자동 전사  ·  Whisper 로컬 처리",
+            variable=self.transcribe_var, font=small, bg="#ffffff",
+            activebackground="#ffffff", fg="#344054",
+            selectcolor="#ffffff").pack(anchor="w", padx=10, pady=(2, 9))
 
-        # 로그
-        tk.Label(self.root, text="저장된 녹음", font=small, fg="#666").pack(anchor="w", padx=18)
-        self.log = tk.Text(self.root, height=6, font=small, state="disabled",
-                           bg="#fafafa", relief="solid", bd=1)
-        self.log.pack(pady=4, padx=16, fill="both", expand=True)
-
-        # 폴더 열기
-        tk.Button(self.root, text="📁  저장 폴더들 열기", font=small,
-                  command=self._open_folder).pack(pady=(0, 12))
+        # 활동 로그 카드
+        log_card = tk.Frame(self.root, bg="#ffffff", highlightbackground="#dfe3e8",
+                            highlightthickness=1)
+        log_card.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+        log_header = tk.Frame(log_card, bg="#ffffff")
+        log_header.pack(fill="x", padx=10, pady=(8, 4))
+        tk.Label(log_header, text="최근 활동", font=button_font,
+                 bg="#ffffff", fg="#344054").pack(side="left")
+        tk.Button(log_header, text="📁  폴더 열기", font=tiny,
+                  command=self._open_folder, relief="flat", bd=0,
+                  bg="#ffffff", fg="#175cd3", activebackground="#ffffff").pack(side="right")
+        self.log = tk.Text(
+            log_card, height=7, font=tiny, state="disabled", bg="#f8fafc",
+            fg="#344054", relief="flat", bd=0, padx=8, pady=6,
+            highlightbackground="#e5e7eb", highlightthickness=1)
+        self.log.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
     def _log(self, msg):
         ts = dt.datetime.now().strftime("%H:%M:%S")
