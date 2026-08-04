@@ -30,6 +30,18 @@ import recorder as r  # 녹음 로직 재사용 (save_clip, find_input_device, r
 CAPTURE_DISPLAY = 2
 
 
+class AudioObjectPropertyAddress(ctypes.Structure):
+    _fields_ = [
+        ("mSelector", ctypes.c_uint32),
+        ("mScope", ctypes.c_uint32),
+        ("mElement", ctypes.c_uint32),
+    ]
+
+
+def _fourcc(value):
+    return int.from_bytes(value.encode("ascii"), "big")
+
+
 class RecorderGUI:
     def __init__(self, root):
         self.root = root
@@ -170,12 +182,102 @@ class RecorderGUI:
             self.notice.configure(
                 text=f"✅ 출력: '{name}' → 녹음 준비 완료", fg="#2e7d32")
             return True
-        else:
-            self.notice.configure(
-                text=(f"⚠️ 현재 출력이 '{name}' 입니다. 강의 소리가 안 담길 수 있어요.\n"
-                      "   시스템 설정 → 사운드 → 출력 → '다중 출력 기기'로 바꿔주세요."),
-                fg="#c62828")
+        self.notice.configure(
+            text=(f"⚠️ 현재 출력이 '{name}' 입니다. 강의 소리가 안 담길 수 있어요.\n"
+                  "   녹음 시작 시 '다중 출력 기기'로 자동 변경합니다."),
+            fg="#c62828")
+        return False
+
+    @staticmethod
+    def _set_default_output_by_name(keywords=("다중 출력", "Multi-Output")):
+        """CoreAudio 기본 출력을 이름에 keywords가 포함된 장치로 변경."""
+        coreaudio = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        corefoundation = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        corefoundation.CFStringGetCString.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+        corefoundation.CFStringGetCString.restype = ctypes.c_bool
+
+        system_object = ctypes.c_uint32(1)
+        global_scope = _fourcc("glob")
+        main_element = 0
+        devices_address = AudioObjectPropertyAddress(
+            _fourcc("dev#"), global_scope, main_element)
+        data_size = ctypes.c_uint32()
+        status = coreaudio.AudioObjectGetPropertyDataSize(
+            system_object, ctypes.byref(devices_address), 0, None,
+            ctypes.byref(data_size))
+        if status != 0:
+            raise RuntimeError(f"오디오 장치 목록 조회 실패: {status}")
+
+        device_count = data_size.value // ctypes.sizeof(ctypes.c_uint32)
+        devices = (ctypes.c_uint32 * device_count)()
+        status = coreaudio.AudioObjectGetPropertyData(
+            system_object, ctypes.byref(devices_address), 0, None,
+            ctypes.byref(data_size), devices)
+        if status != 0:
+            raise RuntimeError(f"오디오 장치 목록 읽기 실패: {status}")
+
+        name_address = AudioObjectPropertyAddress(
+            _fourcc("lnam"), global_scope, main_element)
+        selected = None
+        selected_name = None
+        for device in devices:
+            cf_name = ctypes.c_void_p()
+            name_size = ctypes.c_uint32(ctypes.sizeof(cf_name))
+            status = coreaudio.AudioObjectGetPropertyData(
+                ctypes.c_uint32(device), ctypes.byref(name_address), 0, None,
+                ctypes.byref(name_size), ctypes.byref(cf_name))
+            if status != 0 or not cf_name.value:
+                continue
+            buffer = ctypes.create_string_buffer(512)
+            if not corefoundation.CFStringGetCString(
+                    cf_name, buffer, len(buffer), 0x08000100):
+                continue
+            name = buffer.value.decode("utf-8", errors="replace")
+            if any(keyword.lower() in name.lower() for keyword in keywords):
+                selected = ctypes.c_uint32(device)
+                selected_name = name
+                break
+
+        if selected is None:
+            raise RuntimeError("'다중 출력 기기'를 찾지 못했습니다.")
+
+        for selector in ("dOut", "sOut"):
+            address = AudioObjectPropertyAddress(
+                _fourcc(selector), global_scope, main_element)
+            status = coreaudio.AudioObjectSetPropertyData(
+                system_object, ctypes.byref(address), 0, None,
+                ctypes.sizeof(selected), ctypes.byref(selected))
+            if status != 0:
+                raise RuntimeError(f"기본 출력 변경 실패({selector}): {status}")
+        return selected_name
+
+    def _ensure_recording_output(self):
+        """녹음 전에 BlackHole이 포함된 출력으로 자동 전환."""
+        try:
+            current = sd.query_devices(kind="output")["name"]
+        except Exception as e:
+            self._log(f"출력 장치 확인 실패: {e}")
             return False
+        if (("다중 출력" in current) or ("Multi-Output" in current)
+                or ("BlackHole" in current)):
+            return True
+        try:
+            selected = self._set_default_output_by_name()
+            # PortAudio의 기본 장치 캐시를 새로 읽는다.
+            sd._terminate()
+            sd._initialize()
+            changed = sd.query_devices(kind="output")["name"]
+            if (("다중 출력" in changed) or ("Multi-Output" in changed)
+                    or ("BlackHole" in changed)):
+                self._log(f"출력 자동 변경: '{current}' → '{selected}'")
+                return True
+            self._log(f"출력 변경 확인 실패: 현재 출력 '{changed}'")
+        except Exception as e:
+            self._log(f"출력 자동 변경 실패: {e}")
+        return False
 
     # ---------------- 시작/정지 ----------------
     def _toggle(self):
@@ -190,6 +292,7 @@ class RecorderGUI:
             self._set_status("❌  BlackHole 없음", "#ffcdd2", "#b71c1c")
             self._log("BlackHole 입력 장치를 찾지 못했습니다. 설치/설정을 확인하세요.")
             return
+        self._ensure_recording_output()
         if not self._check_output():
             self._set_status("⚠️  출력 변경 필요", "#fff4e5", "#9a3412")
             self._log("녹음 시작 차단: 출력을 '다중 출력 기기'로 바꿔주세요.")
