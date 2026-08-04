@@ -461,8 +461,10 @@ class RecorderGUI:
                     self._log("오늘의 녹음·전사·캡처 파일을 종합폴더로 이동 중…")
                 elif kind == "collection_done":
                     self.collect_btn.configure(state="normal")
-                    folder_name, count = payload
-                    self._log(f"4) 종합 완료: {folder_name} ({count}개 이동)")
+                    folder_name, count, deleted_images = payload
+                    self._log(f"4) 종합 완료: {folder_name} ({count}개 보관)")
+                    if deleted_images:
+                        self._log(f"PDF 검증 후 캡처 PNG {deleted_images}개 자동 삭제")
                     self._log("기존 날짜 폴더는 빈 폴더로 유지")
                 elif kind == "collection_error":
                     self.collect_btn.configure(state="normal")
@@ -780,7 +782,7 @@ class RecorderGUI:
             "4) 종합폴더로 모으기",
             f"오늘의 녹음·전사·캡처 파일 {file_count}개를\n"
             f"새 폴더 '{os.path.basename(self._next_combined_dir())}'로 이동합니다.\n"
-            "기존 날짜 폴더는 삭제하지 않고 빈 폴더로 남깁니다. 계속할까요?")
+            "PDF를 검증한 뒤 PNG는 삭제하고 WAV·TXT·PDF만 남깁니다. 계속할까요?")
         if not confirmed:
             return
         self.ui_q.put(("collection_started", None))
@@ -802,8 +804,10 @@ class RecorderGUI:
 
     def _run_daily_collection(self):
         try:
-            folder, count = self._collect_daily_files()
-            self.ui_q.put(("collection_done", (os.path.basename(folder), count)))
+            folder, count, deleted_images = self._collect_daily_files()
+            self.ui_q.put((
+                "collection_done",
+                (os.path.basename(folder), count, deleted_images)))
         except Exception as e:
             self.ui_q.put(("collection_error", str(e)))
 
@@ -824,10 +828,26 @@ class RecorderGUI:
 
     def _collect_daily_files(self):
         """세 날짜 폴더의 파일을 종합 날짜 폴더로 이동하고 원래 폴더는 유지."""
+        from pypdf import PdfReader
+
         sources = self._daily_collection_sources()
         files = [(source_dir, path) for source_dir, paths in sources for path in paths]
         if not files:
             raise RuntimeError("오늘 날짜 폴더에 이동할 파일이 없습니다.")
+
+        image_paths = [path for _, path in files if path.lower().endswith(".png")]
+        pdf_paths = [path for _, path in files if path.lower().endswith(".pdf")]
+        if image_paths and not pdf_paths:
+            raise RuntimeError(
+                "캡처 PNG가 있지만 PDF가 없습니다. 먼저 'PDF 만들기'를 실행하세요.")
+        for pdf_path in pdf_paths:
+            try:
+                if len(PdfReader(pdf_path).pages) == 0:
+                    raise RuntimeError("페이지가 없습니다.")
+            except Exception as e:
+                raise RuntimeError(
+                    f"PDF 검증 실패로 파일을 이동하지 않았습니다: "
+                    f"{os.path.basename(pdf_path)} ({e})") from e
 
         destination_dir = self._next_combined_dir()
         os.makedirs(destination_dir, exist_ok=True)
@@ -846,11 +866,22 @@ class RecorderGUI:
             for source_dir, source_path, destination in destinations:
                 shutil.move(source_path, destination)
                 moved.append((source_path, destination))
+            # 이동된 PDF를 다시 열어 확인한 뒤에만 종합폴더의 PNG를 삭제한다.
+            for _, destination in moved:
+                if destination.lower().endswith(".pdf"):
+                    if len(PdfReader(destination).pages) == 0:
+                        raise RuntimeError("이동된 PDF에 페이지가 없습니다.")
         except Exception:
             for source_path, destination in reversed(moved):
                 if os.path.exists(destination) and not os.path.exists(source_path):
                     shutil.move(destination, source_path)
             raise
+
+        deleted_images = 0
+        for _, destination in moved:
+            if destination.lower().endswith(".png"):
+                os.remove(destination)
+                deleted_images += 1
 
         # Finder가 만든 숨김 파일을 제거해 원래 날짜 폴더에는 내용이 남지 않게 한다.
         for source_dir, _ in sources:
@@ -859,7 +890,7 @@ class RecorderGUI:
                 os.remove(metadata)
             except FileNotFoundError:
                 pass
-        return destination_dir, len(moved)
+        return destination_dir, len(moved) - deleted_images, deleted_images
 
     def _open_folder(self):
         folders = (self.save_dir, self.transcribe_dir, self.capture_dir, self.combined_dir)
