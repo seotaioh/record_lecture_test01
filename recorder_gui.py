@@ -165,15 +165,17 @@ class RecorderGUI:
             name = sd.query_devices(kind="output")["name"]
         except Exception:
             self.notice.configure(text="")
-            return
+            return False
         if ("다중 출력" in name) or ("Multi-Output" in name) or ("BlackHole" in name):
             self.notice.configure(
                 text=f"✅ 출력: '{name}' → 녹음 준비 완료", fg="#2e7d32")
+            return True
         else:
             self.notice.configure(
                 text=(f"⚠️ 현재 출력이 '{name}' 입니다. 강의 소리가 안 담길 수 있어요.\n"
                       "   시스템 설정 → 사운드 → 출력 → '다중 출력 기기'로 바꿔주세요."),
                 fg="#c62828")
+            return False
 
     # ---------------- 시작/정지 ----------------
     def _toggle(self):
@@ -188,7 +190,18 @@ class RecorderGUI:
             self._set_status("❌  BlackHole 없음", "#ffcdd2", "#b71c1c")
             self._log("BlackHole 입력 장치를 찾지 못했습니다. 설치/설정을 확인하세요.")
             return
-        self._check_output()
+        if not self._check_output():
+            self._set_status("⚠️  출력 변경 필요", "#fff4e5", "#9a3412")
+            self._log("녹음 시작 차단: 출력을 '다중 출력 기기'로 바꿔주세요.")
+            messagebox.showwarning(
+                "오디오 출력 변경 필요",
+                "현재 강의 소리가 BlackHole로 전달되지 않습니다.\n\n"
+                "시스템 설정 → 사운드 → 출력에서\n"
+                "'다중 출력 기기'를 선택한 뒤 녹음 시작을 다시 눌러주세요.")
+            subprocess.run([
+                "open",
+                "x-apple.systempreferences:com.apple.Sound-Settings.extension"])
+            return
         self.stop_event.clear()
         self.session_on = True
         self.btn.configure(text="■  녹음 정지", highlightbackground="#c62828")
