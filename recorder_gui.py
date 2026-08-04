@@ -779,7 +779,8 @@ class RecorderGUI:
         confirmed = messagebox.askyesno(
             "4) 종합폴더로 모으기",
             f"오늘의 녹음·전사·캡처 파일 {file_count}개를\n"
-            "종합 날짜 폴더로 이동합니다. 기존 날짜 폴더는 비워집니다. 계속할까요?")
+            f"새 폴더 '{os.path.basename(self._next_combined_dir())}'로 이동합니다.\n"
+            "기존 날짜 폴더는 삭제하지 않고 빈 폴더로 남깁니다. 계속할까요?")
         if not confirmed:
             return
         self.ui_q.put(("collection_started", None))
@@ -806,6 +807,21 @@ class RecorderGUI:
         except Exception as e:
             self.ui_q.put(("collection_error", str(e)))
 
+    def _next_combined_dir(self):
+        """오늘 날짜의 다음 종합 일련번호 폴더 경로를 반환한다."""
+        os.makedirs(self.combined_dir, exist_ok=True)
+        day = dt.datetime.now().strftime("%Y-%m-%d")
+        prefix = f"종합4) {day}_"
+        numbers = []
+        for name in os.listdir(self.combined_dir):
+            normalized = unicodedata.normalize("NFC", name)
+            if normalized.startswith(prefix):
+                suffix = normalized[len(prefix):]
+                if suffix.isdigit():
+                    numbers.append(int(suffix))
+        next_number = max(numbers, default=0) + 1
+        return os.path.join(self.combined_dir, f"{prefix}{next_number:03d}")
+
     def _collect_daily_files(self):
         """세 날짜 폴더의 파일을 종합 날짜 폴더로 이동하고 원래 폴더는 유지."""
         sources = self._daily_collection_sources()
@@ -813,7 +829,7 @@ class RecorderGUI:
         if not files:
             raise RuntimeError("오늘 날짜 폴더에 이동할 파일이 없습니다.")
 
-        destination_dir = self._dated_dir(self.combined_dir)
+        destination_dir = self._next_combined_dir()
         os.makedirs(destination_dir, exist_ok=True)
         destinations = []
         names = set()
